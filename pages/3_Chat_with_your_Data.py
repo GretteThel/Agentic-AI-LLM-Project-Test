@@ -12,6 +12,7 @@ your documents and provide answers based on the content.
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
+from prompt_toolkit import prompt
 from pypdf import PdfReader
 from PIL import Image
 import docx
@@ -309,13 +310,15 @@ if st.session_state.vector_store and st.session_state.rag_agent is None:
 
         prompt = f"""Are these documents relevant to the question: "{state['question']}"?
 
-Documents:
-{docs[0].page_content[:500]}
+Documents: {docs[0].page_content[:500]}
 
 Answer with just 'yes' or 'no'."""
-        response = st.session_state.llm.invoke(prompt)
-        return "generate" if "yes" in response.content.lower() else "rewrite"
+        #response = st.session_state.llm.invoke(prompt)
+        #return "generate" if "yes" in response.content.lower() else "rewrite"
 
+        resp = st.session_state.llm.invoke(prompt).content.lower()
+        return "generate" if "yes" in resp else "rewrite"
+    
     # Node 3: Rewrite question
     def rewrite_question(state: AgentState):
         rewrite_count = state.get("rewrite_count", 0) + 1
@@ -367,18 +370,16 @@ Answer with just 'yes' or 'no'."""
         }
 
     workflow = StateGraph(AgentState)
-    workflow.add_node("retrieve", retrieve_documents)
-    workflow.add_node("grade", grade_documents)
-    workflow.add_node("rewrite", rewrite_question)
-    workflow.add_node("generate", generate_answer)
+    workflow.add_node("retrieve", retrieve)
+    workflow.add_node("rewrite", rewrite)
+    workflow.add_node("generate", generate)
 
     workflow.add_edge(START, "retrieve")
-    workflow.add_conditional_edges("retrieve", grade_documents)
+    workflow.add_conditional_edges("retrieve", grade)  # routes to "generate" or "rewrite"
     workflow.add_edge("rewrite", "retrieve")
     workflow.add_edge("generate", END)
 
     st.session_state.rag_agent = workflow.compile()
-
 
 if st.session_state.vector_store:
     
