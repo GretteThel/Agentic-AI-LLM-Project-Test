@@ -19,13 +19,13 @@ faiss-cpu==1.12.0
 tavily-python==0.7.1
 langchain-tavily==0.2.11
 
-# Other tools
-pypdf==6.0.0
-
 # MCP (Model Context Protocol) Dependencies
 langchain-mcp-adapters==0.1.9
 
+# Other tools
 requests>=2.31.0
+pypdf==6.0.0
+pillow>=10.0.0
 
 # Assignment 2: Research agent tools
 wikipedia>=1.4.0
@@ -33,3 +33,4 @@ arxiv==2.2.0
 
 # Assignment 3: Multi-format document support
 python-docx>=0.8.11
+
