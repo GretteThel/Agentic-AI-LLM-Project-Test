@@ -33,7 +33,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # PyPDFLoader: Loads and reads PDF files
 from langchain_community.document_loaders import PyPDFLoader
-import tempfile, os
+import tempfile
 
 # FAISS: Fast similarity search database (stores document chunks as vectors)
 from langchain_community.vectorstores import FAISS
@@ -275,22 +275,16 @@ if uploaded_files:
 
 #if st.session_state.vector_store and not st.session_state.rag_agent:
 if st.session_state.vector_store and st.session_state.rag_agent is None:
-    
+
     # Define state structure for the workflow
     class AgentState(TypedDict):
-        question: str  # User's question
-        documents: list  # Retrieved documents
-        generation: str  # Generated answer
-        steps: list  # Track what the agent does
+        question: str
+        documents: list
+        generation: str
+        steps: list
         rewrite_count: int
 
-# =========================================================
-# CHAT INTERFACE
-# =========================================================
-#if st.session_state.vector_store and not st.session_state.rag_agent:
-
     # Node 1: Retrieve documents
-
     def retrieve_documents(state: AgentState):
         question = state["question"]
         retriever = st.session_state.vector_store.as_retriever()
@@ -302,8 +296,8 @@ if st.session_state.vector_store and st.session_state.rag_agent is None:
             "steps": state.get("steps", []) + ["📚 Retrieved documents"],
             "rewrite_count": state.get("rewrite_count", 0),
         }
-    
-    # Node 2: Grade document relevance
+
+    # Node 2: Grade relevance
     def grade_documents(state: AgentState) -> Literal["generate", "rewrite"]:
         docs = state["documents"]
         rewrite_count = state.get("rewrite_count", 0)
@@ -315,13 +309,13 @@ if st.session_state.vector_store and st.session_state.rag_agent is None:
 
         prompt = f"""Are these documents relevant to the question: "{state['question']}"?
 
-Documents: {docs[0].page_content[:500]}
+Documents:
+{docs[0].page_content[:500]}
 
 Answer with just 'yes' or 'no'."""
         response = st.session_state.llm.invoke(prompt)
         return "generate" if "yes" in response.content.lower() else "rewrite"
 
-    
     # Node 3: Rewrite question
     def rewrite_question(state: AgentState):
         rewrite_count = state.get("rewrite_count", 0) + 1
@@ -338,10 +332,11 @@ Answer with just 'yes' or 'no'."""
             "steps": state["steps"] + [f"🔄 Rewrote question (attempt {rewrite_count}): {new_question}"],
             "rewrite_count": rewrite_count,
         }
+
     # Node 4: Generate answer
-     def generate_answer(state: AgentState):
-        docs = state["documents"]
+    def generate_answer(state: AgentState):
         question = state["question"]
+        docs = state["documents"]
 
         if not docs:
             return {
@@ -352,7 +347,7 @@ Answer with just 'yes' or 'no'."""
                 "rewrite_count": state.get("rewrite_count", 0),
             }
 
-        context = "\n\n---\n\n".join((doc.page_content or "") for doc in docs[:5])
+        context = "\n\n---\n\n".join((d.page_content or "") for d in docs[:5])
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Answer the question using ONLY the provided context. Be concise and accurate."),
@@ -361,31 +356,27 @@ Answer with just 'yes' or 'no'."""
 
         response = st.session_state.llm.invoke(
             prompt.format_messages(question=question, context=context)
-        )       
+        )
+
         return {
             "question": question,
             "documents": docs,
             "generation": response.content,
             "steps": state["steps"] + ["💬 Generated answer"],
             "rewrite_count": state.get("rewrite_count", 0),
-        }       
-    
-    # Build the workflow graph
+        }
+
     workflow = StateGraph(AgentState)
-    
-    # Add nodes
     workflow.add_node("retrieve", retrieve_documents)
     workflow.add_node("grade", grade_documents)
     workflow.add_node("rewrite", rewrite_question)
     workflow.add_node("generate", generate_answer)
-    
-    # Define the flow
+
     workflow.add_edge(START, "retrieve")
     workflow.add_conditional_edges("retrieve", grade_documents)
-    workflow.add_edge("rewrite", "retrieve")  # After rewrite, retrieve again
+    workflow.add_edge("rewrite", "retrieve")
     workflow.add_edge("generate", END)
-    
-    # Compile and save
+
     st.session_state.rag_agent = workflow.compile()
 
 
@@ -416,13 +407,13 @@ if st.session_state.vector_store:
                 
                 # Run the agentic workflow
                 result = st.session_state.rag_agent.invoke({
-                    "question": user_input,
-                    "documents": [],
-                    "generation": "",
+                   "question": user_input,
+                   "documents": [],
+                   "generation": "",
                     "steps": [],
-                    "rewrite_count": 0
+                   "rewrite_count": 0
                 })
-                
+                 
                 # Show agent's reasoning process
                 with st.expander("🤖 View Agent Process", expanded=False):
                     st.markdown("### What the agent did:")
