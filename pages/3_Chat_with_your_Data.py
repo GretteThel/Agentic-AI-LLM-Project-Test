@@ -10,6 +10,14 @@ your documents and provide answers based on the content.
 # IMPORTS (Libraries we need)
 # =========================================================
 
+from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
+from pypdf import PdfReader
+from PIL import Image
+import docx
+import io, base64
+import pandas as pd
+
 # Streamlit: Framework for building web apps with Python
 import streamlit as st
 
@@ -25,6 +33,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # PyPDFLoader: Loads and reads PDF files
 from langchain_community.document_loaders import PyPDFLoader
+import tempfile, os
 
 # FAISS: Fast similarity search database (stores document chunks as vectors)
 from langchain_community.vectorstores import FAISS
@@ -37,10 +46,6 @@ from langgraph.graph import StateGraph, START, END
 from typing_extensions import TypedDict
 from typing import Literal
 
-# LangGraph: For building agentic workflows
-from langgraph.graph import StateGraph, START, END
-from typing_extensions import TypedDict
-from typing import Literal
 # =========================================================
 # PAGE SETUP
 # =========================================================
@@ -125,68 +130,151 @@ if not st.session_state.openai_key:
     
     st.stop()  # Don't show rest of app until connected
 
+def pdf_to_text(file) -> str:
+    reader = PdfReader(io.BytesIO(file.getvalue()))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+def docx_to_text(file) -> str:
+    d = docx.Document(io.BytesIO(file.getvalue()))
+    return "\n".join(p.text for p in d.paragraphs if p.text)
+
+def txt_to_text(file) -> str:
+    return file.getvalue().decode("utf-8", errors="ignore")
+
+def image_to_vision_text(file) -> str:
+    """Vision analysis: describe image + extract text + structure."""
+    img_bytes = file.getvalue()
+    b64 = base64.b64encode(img_bytes).decode("utf-8")
+    data_url = f"data:{file.type};base64,{b64}"
+
+    msg = HumanMessage(content=[
+        {"type": "text", "text": (
+            "Analyze this image thoroughly.\n"
+            "1) Describe the scene in detail.\n"
+            "2) Extract ALL visible text as accurately as possible.\n"
+            "3) List key entities (people, objects, brands, places, dates).\n"
+            "4) If it's a document/screenshot, reconstruct headings/bullets/tables.\n"
+            "Return a clean structured markdown summary."
+        )},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ])
+
+    vision_llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0,
+        api_key=st.session_state.openai_key
+    )
+
+    return vision_llm.invoke([msg]).content
+
+def pdf_to_documents(file):
+    reader = PdfReader(io.BytesIO(file.getvalue()))
+    docs = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if text.strip():
+            docs.append(Document(
+                page_content=text,
+                metadata={"source": file.name, "page": i, "type": "pdf"}
+            ))
+    return docs
+
+def pdf_to_documents_fallback(file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(file.getvalue())
+        tmp_path = tmp.name
+
+    loader = PyPDFLoader(tmp_path)
+    docs = loader.load()
+
+    os.remove(tmp_path)
+    return docs
+
+def csv_to_text(file) -> str:
+    df = pd.read_csv(file)
+    return df.to_markdown(index=False)
+
+def excel_to_text(file) -> str:
+    xls = pd.ExcelFile(io.BytesIO(file.getvalue()))
+    parts = []
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        parts.append(f"# Sheet: {sheet}\n" + df.to_markdown(index=False))
+    return "\n\n".join(parts)
 
 # =========================================================
 # PDF UPLOAD AND PROCESSING
 # =========================================================
 
 uploaded_files = st.file_uploader(
-    "Upload PDF documents",
-    type=["pdf"],
-    accept_multiple_files=True  # Allow multiple PDFs
+    "Upload files (PDF, DOCX, TXT, Images)",
+    type=["pdf", "docx", "txt", "csv", "xlsx", "xls", "png", "jpg", "jpeg", "webp"],
+    accept_multiple_files=True
 )
 
 if uploaded_files:
-    current_files = [f.name for f in uploaded_files]
-    
-    # Check if we need to process (avoid reprocessing on every rerun)
+    current_files = sorted([f"{f.name}:{f.size}" for f in uploaded_files])
+
     if st.session_state.processed_files != current_files:
-        
-        with st.spinner("Processing documents..."):
-            # Load PDFs
+        with st.spinner("Processing files..."):
             documents = []
-            os.makedirs("tmp", exist_ok=True)
-            
+
             for file in uploaded_files:
-                # Save to temporary file (PyPDFLoader needs file path)
-                file_path = os.path.join("tmp", file.name)
-                with open(file_path, "wb") as f:
-                    f.write(file.getvalue())
+                ext = file.name.split(".")[-1].lower()
+
+                if ext == "pdf":
+                    documents.extend(pdf_to_documents(file))
+
+                elif ext == "docx":
+                    text = docx_to_text(file)
+                    documents.append(Document(page_content=text, metadata={"source": file.name, "type": "docx"}))
+
+                elif ext == "txt":
+                    text = txt_to_text(file)
+                    documents.append(Document(page_content=text, metadata={"source": file.name, "type": "txt"}))
+
+                elif ext == "csv":
+                    text = csv_to_text(file)
+                    documents.append(Document(page_content=text, metadata={"source": file.name, "type": "csv"}))
+
+                elif ext in ["xlsx", "xls"]:
+                    text = excel_to_text(file)
+                    documents.append(Document(page_content=text, metadata={"source": file.name, "type": "excel"}))
+                    
+                elif ext in ["png", "jpg", "jpeg", "webp"]:
+                    st.image(Image.open(file), caption=file.name, use_container_width=True)
+                    with st.spinner(f"Analyzing image: {file.name} ..."):
+                        vision_text = image_to_vision_text(file)
                 
-                # Load PDF
-                loader = PyPDFLoader(file_path)
-                documents.extend(loader.load())
-            
-            # Split into chunks (long documents → smaller pieces)
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1500,      # Each chunk max 1500 characters
-                chunk_overlap=200     # 200 character overlap between chunks
-            )
+                    documents.append(Document(
+                        page_content=vision_text,
+                        metadata={"source": file.name, "type": "image"}
+                    ))
+
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
             chunks = text_splitter.split_documents(documents)
-            
-            # Create vector store (searchable database)
-            # Converts text chunks to vectors (numbers) for similarity search
+
             embeddings = OpenAIEmbeddings(api_key=st.session_state.openai_key)
             st.session_state.vector_store = FAISS.from_documents(chunks, embeddings)
-            
-            # Create language model
+
             st.session_state.llm = ChatOpenAI(
-                model="gpt-4o-mini",  # Use GPT-4o-mini (fast and cheap)
-                temperature=0,  # 0 = deterministic, 1 = creative
+                model="gpt-4o-mini",
+                temperature=0,
                 api_key=st.session_state.openai_key
             )
-            
-            # Reset chat and update processed files
+
             st.session_state.rag_messages = []
             st.session_state.processed_files = current_files
-            
-            st.success(f"✅ Processed {len(uploaded_files)} document(s)!")
+            st.session_state.rag_agent = None  # rebuild graph for new docs
+
+            st.success(f"✅ Processed {len(uploaded_files)} file(s)!")
 
 # =============================================================================
 # CREATE AGENTIC RAG WORKFLOW
 # =============================================================================
 
-if st.session_state.vector_store and not st.session_state.rag_agent:
+#if st.session_state.vector_store and not st.session_state.rag_agent:
+if st.session_state.vector_store and st.session_state.rag_agent is None:
     
     # Define state structure for the workflow
     class AgentState(TypedDict):
@@ -194,96 +282,93 @@ if st.session_state.vector_store and not st.session_state.rag_agent:
         documents: list  # Retrieved documents
         generation: str  # Generated answer
         steps: list  # Track what the agent does
+        rewrite_count: int
 
 # =========================================================
 # CHAT INTERFACE
 # =========================================================
-if st.session_state.vector_store and not st.session_state.rag_agent:
-    
-    # Define state structure for the workflow
-    class AgentState(TypedDict):
-        question: str  # User's question
-        documents: list  # Retrieved documents
-        generation: str  # Generated answer
-        steps: list  # Track what the agent does
-    
+#if st.session_state.vector_store and not st.session_state.rag_agent:
+
     # Node 1: Retrieve documents
+
     def retrieve_documents(state: AgentState):
-        """Search documents for relevant information"""
         question = state["question"]
         retriever = st.session_state.vector_store.as_retriever()
         docs = retriever.invoke(question)
-        
         return {
+            "question": question,
             "documents": docs,
-            "steps": state.get("steps", []) + ["📚 Retrieved documents"]
+            "generation": state.get("generation", ""),
+            "steps": state.get("steps", []) + ["📚 Retrieved documents"],
+            "rewrite_count": state.get("rewrite_count", 0),
         }
-
     
     # Node 2: Grade document relevance
     def grade_documents(state: AgentState) -> Literal["generate", "rewrite"]:
-        """Check if retrieved documents are actually relevant"""
-        question = state["question"]
         docs = state["documents"]
-    
-        if not docs: 
-            return "rewrite"
-        
-        # Simple relevance check using LLM
-        prompt = f"""Are these documents relevant to the question: "{question}"?
-        
-        Documents: {docs[0].page_content[:500]}
+        rewrite_count = state.get("rewrite_count", 0)
 
-        Answer with just 'yes' or 'no'."""
-        
+        if rewrite_count >= 2:
+            return "generate"
+        if not docs:
+            return "rewrite"
+
+        prompt = f"""Are these documents relevant to the question: "{state['question']}"?
+
+Documents: {docs[0].page_content[:500]}
+
+Answer with just 'yes' or 'no'."""
         response = st.session_state.llm.invoke(prompt)
-        is_relevant = "yes" in response.content.lower()
-        
-        return "generate" if is_relevant else "rewrite"
+        return "generate" if "yes" in response.content.lower() else "rewrite"
 
     
     # Node 3: Rewrite question
     def rewrite_question(state: AgentState):
-        """Rewrite question for better search results"""
+        rewrite_count = state.get("rewrite_count", 0) + 1
         question = state["question"]
-        
-        rewrite_prompt = f"Rewrite this question to be more specific and searchable OR YOU CAN ALSO ADD YOU COMPANY TECH JARGONS DICTIONARY : {question}"
-        new_question = st.session_state.llm.invoke(rewrite_prompt).content
-        
+
+        new_question = st.session_state.llm.invoke(
+            f"Rewrite this question to be more specific and searchable:\n\n{question}"
+        ).content
+
         return {
             "question": new_question,
-            "steps": state["steps"] + [f"🔄 Rewrote question: {new_question}"]
+            "documents": [],
+            "generation": "",
+            "steps": state["steps"] + [f"🔄 Rewrote question (attempt {rewrite_count}): {new_question}"],
+            "rewrite_count": rewrite_count,
         }
-    
     # Node 4: Generate answer
-    def generate_answer(state: AgentState):
-        """Generate final answer from documents"""
-        question = state["question"]
+     def generate_answer(state: AgentState):
         docs = state["documents"]
-        
+        question = state["question"]
+
         if not docs:
             return {
+                "question": question,
+                "documents": docs,
                 "generation": "I couldn't find relevant information in the documents.",
-                "steps": state["steps"] + ["❌ No relevant documents found"]
+                "steps": state["steps"] + ["❌ No relevant documents found"],
+                "rewrite_count": state.get("rewrite_count", 0),
             }
-        
-        # Combine documents into context
-        context = "\n\n---\n\n".join(doc.page_content for doc in docs[:5])
-        
-        # Generate answer
+
+        context = "\n\n---\n\n".join((doc.page_content or "") for doc in docs[:5])
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Answer the question using ONLY the provided context. Be concise and accurate."),
             ("human", "Question: {question}\n\nContext: {context}\n\nAnswer:")
         ])
-        
+
         response = st.session_state.llm.invoke(
             prompt.format_messages(question=question, context=context)
-        )
-        
+        )       
         return {
+            "question": question,
+            "documents": docs,
             "generation": response.content,
-            "steps": state["steps"] + ["💬 Generated answer"]
-        }
+            "steps": state["steps"] + ["💬 Generated answer"],
+            "rewrite_count": state.get("rewrite_count", 0),
+        }       
     
     # Build the workflow graph
     workflow = StateGraph(AgentState)
@@ -334,7 +419,8 @@ if st.session_state.vector_store:
                     "question": user_input,
                     "documents": [],
                     "generation": "",
-                    "steps": []
+                    "steps": [],
+                    "rewrite_count": 0
                 })
                 
                 # Show agent's reasoning process
